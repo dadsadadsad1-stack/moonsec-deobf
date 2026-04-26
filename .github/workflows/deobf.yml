@@ -24,8 +24,19 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Install Lua 5.1
-        run: sudo apt-get install -y lua5.1 || true
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y lua5.1 luarocks build-essential git xxd || true
+
+      - name: Build luadec
+        run: |
+          git clone https://github.com/viruscamp/luadec || true
+          cd luadec
+          git clone https://github.com/viruscamp/lua-5.1.5 lua-5.1.5 || true
+          cd lua-5.1.5 && make linux && cd ..
+          make LUA_VERSION=5.1 || true
+          ls -la luadec || true
 
       - name: Cache build output
         id: cache-build
@@ -43,7 +54,13 @@ jobs:
           wget -q "https://sourceforge.net/projects/unluac/files/Unstable/unluac_2025_10_20.jar/download" -O unluac.jar --content-disposition || true
           echo "unluac.jar size: $(wc -c < unluac.jar 2>/dev/null || echo 0) bytes"
 
-      - name: Deobfuscate
+      - name: Check input
+        run: |
+          echo "input.lua size: $(wc -c < input.lua 2>/dev/null || echo 0) bytes"
+          xxd input.lua | head -3 || true
+          file input.lua || true
+
+      - name: Deobfuscate (MoonsecDeobfuscator)
         shell: bash
         run: |
           set +e
@@ -56,15 +73,57 @@ jobs:
             echo "devirt.lua empty, using raw input"
             DECOMPILE_INPUT="input.lua"
           fi
-          echo "trying unluac..."
+          echo "DECOMPILE_INPUT=$DECOMPILE_INPUT" >> $GITHUB_ENV
+
+      - name: Decompile (unluac)
+        shell: bash
+        run: |
+          set +e
+          echo "trying unluac on $DECOMPILE_INPUT..."
           timeout 120 java -jar unluac.jar "$DECOMPILE_INPUT" > result.lua 2>unluac_err.txt
           UNLUAC_EXIT=$?
           cat unluac_err.txt || true
           if [ $UNLUAC_EXIT -eq 0 ] && [ -s result.lua ]; then
             echo "unluac succeeded"
+            echo "DECOMPILED=true" >> $GITHUB_ENV
           else
-            echo "unluac failed, will use AI"
-            cp "$DECOMPILE_INPUT" result.lua
+            echo "unluac failed"
+            echo "DECOMPILED=false" >> $GITHUB_ENV
+            rm -f result.lua
+          fi
+
+      - name: Decompile (luadec)
+        if: env.DECOMPILED != 'true'
+        shell: bash
+        run: |
+          set +e
+          echo "trying luadec on $DECOMPILE_INPUT..."
+          LUADEC="./luadec/luadec"
+          if [ ! -f "$LUADEC" ]; then
+            echo "luadec binary not found, skipping"
+            exit 0
+          fi
+          timeout 120 "$LUADEC" "$DECOMPILE_INPUT" > result.lua 2>luadec_err.txt
+          LUADEC_EXIT=$?
+          cat luadec_err.txt || true
+          if [ $LUADEC_EXIT -eq 0 ] && [ -s result.lua ]; then
+            echo "luadec succeeded"
+            echo "DECOMPILED=true" >> $GITHUB_ENV
+          else
+            echo "luadec failed"
+            echo "DECOMPILED=false" >> $GITHUB_ENV
+            rm -f result.lua
+          fi
+
+      - name: Decompile fallback (copy input)
+        if: env.DECOMPILED != 'true'
+        shell: bash
+        run: |
+          echo "all decompilers failed, copying best available input for AI"
+          if [ -f devirt.lua ] && [ -s devirt.lua ]; then
+            cp devirt.lua result.lua
+          else
+            cp input.lua result.lua
           fi
 
       - name: AI Decompile
@@ -81,7 +140,8 @@ jobs:
 
           echo "AI decompiling: $INPUT_FILE"
 
-          CONTENT=$(head -c 40000 "$INPUT_FILE")
+          # Strip null bytes, limit chars to stay under TPM limit
+          CONTENT=$(tr -d '\0' < "$INPUT_FILE" | head -c 8000)
 
           PAYLOAD=$(python3 -c "
           import json, sys
@@ -99,7 +159,7 @@ jobs:
           )
           print(json.dumps({
               'model': 'llama-3.3-70b-versatile',
-              'max_tokens': 8000,
+              'max_tokens': 2000,
               'temperature': 0.1,
               'messages': [{'role': 'user', 'content': prompt}]
           }))
@@ -112,7 +172,7 @@ jobs:
             -d "$PAYLOAD" \
             "https://api.groq.com/openai/v1/chat/completions")
 
-          echo "Groq response preview: ${RESPONSE:0:200}"
+          echo "Groq response preview: ${RESPONSE:0:300}"
 
           RESULT=$(python3 -c "
           import json, sys
@@ -134,7 +194,6 @@ jobs:
           fi
 
           if [ ! -f result.lua ] || [ ! -s result.lua ]; then
-            echo "result.lua missing, falling back"
             if [ -f devirt.lua ] && [ -s devirt.lua ]; then
               cp devirt.lua result.lua
             elif [ -f input.lua ] && [ -s input.lua ]; then
