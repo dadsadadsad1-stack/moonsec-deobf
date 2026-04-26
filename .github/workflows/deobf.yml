@@ -67,6 +67,84 @@ jobs:
             cp "$DECOMPILE_INPUT" result.lua
           fi
 
+      - name: Write AI script
+        run: |
+          cat > /tmp/ai_decompile.py << 'PYEOF'
+          import urllib.request
+          import urllib.error
+          import json
+          import os
+
+          input_file = "result.lua"
+          if not os.path.exists(input_file) or os.path.getsize(input_file) == 0:
+              input_file = "devirt.lua"
+          if not os.path.exists(input_file) or os.path.getsize(input_file) == 0:
+              input_file = "input.lua"
+
+          print(f"AI decompiling: {input_file}")
+
+          with open(input_file, "r", errors="replace") as f:
+              content = f.read()
+
+          MAX_CHARS = 40000
+          if len(content) > MAX_CHARS:
+              content = content[:MAX_CHARS]
+              print(f"Warning: truncated to {MAX_CHARS} chars")
+
+          prompt = (
+              "You are a Lua decompiler. I will give you Lua bytecode or devirtualized Lua code. "
+              "Your job is to produce the cleanest possible readable Lua source code.\n\n"
+              "Rules:\n"
+              "- Name all variables as b1, b2, b3, b4... in order of appearance\n"
+              "- Name all functions as f1, f2, f3... in order of appearance\n"
+              "- No comments of any kind\n"
+              "- No explanations, only output raw Lua code\n"
+              "- Reconstruct proper if/else, while, for loops from jump instructions\n"
+              "- Remove all bytecode artifacts\n"
+              "- Make the logic as clean and readable as possible\n"
+              "- Output only valid Lua 5.1 code\n\n"
+              "Input:\n" + content
+          )
+
+          payload = {
+              "model": "llama-3.3-70b-versatile",
+              "max_tokens": 8000,
+              "temperature": 0.1,
+              "messages": [{"role": "user", "content": prompt}]
+          }
+
+          api_key = os.environ.get("GROQ_API_KEY", "")
+          if not api_key:
+              print("No GROQ_API_KEY found, skipping AI step")
+              exit(0)
+
+          req = urllib.request.Request(
+              "https://api.groq.com/openai/v1/chat/completions",
+              data=json.dumps(payload).encode(),
+              headers={
+                  "Content-Type": "application/json",
+                  "Authorization": f"Bearer {api_key}"
+              }
+          )
+
+          try:
+              with urllib.request.urlopen(req, timeout=120) as r:
+                  data = json.loads(r.read())
+                  result = data["choices"][0]["message"]["content"].strip()
+                  if result.startswith("```"):
+                      lines = result.split("\n")
+                      result = "\n".join(lines[1:])
+                      if result.endswith("```"):
+                          result = result[:-3].strip()
+                  with open("result.lua", "w") as f:
+                      f.write(result)
+                  print(f"AI decompile succeeded, output size: {len(result)} chars")
+          except urllib.error.HTTPError as e:
+              print(f"AI HTTP error: {e.code} {e.read().decode()}")
+          except Exception as e:
+              print(f"AI decompile failed: {e}")
+          PYEOF
+
       - name: AI Decompile
         if: always()
         env:
@@ -74,81 +152,6 @@ jobs:
         shell: bash
         run: |
           set +e
-          cat > /tmp/ai_decompile.py << 'PYEOF'
-import urllib.request
-import urllib.error
-import json
-import os
-
-input_file = "result.lua"
-if not os.path.exists(input_file) or os.path.getsize(input_file) == 0:
-    input_file = "devirt.lua"
-if not os.path.exists(input_file) or os.path.getsize(input_file) == 0:
-    input_file = "input.lua"
-
-print(f"AI decompiling: {input_file}")
-
-with open(input_file, "r", errors="replace") as f:
-    content = f.read()
-
-MAX_CHARS = 40000
-if len(content) > MAX_CHARS:
-    content = content[:MAX_CHARS]
-    print(f"Warning: truncated to {MAX_CHARS} chars")
-
-prompt = (
-    "You are a Lua decompiler. I will give you Lua bytecode or devirtualized Lua code. "
-    "Your job is to produce the cleanest possible readable Lua source code.\n\n"
-    "Rules:\n"
-    "- Name all variables as b1, b2, b3, b4... in order of appearance\n"
-    "- Name all functions as f1, f2, f3... in order of appearance\n"
-    "- No comments of any kind\n"
-    "- No explanations, only output raw Lua code\n"
-    "- Reconstruct proper if/else, while, for loops from jump instructions\n"
-    "- Remove all bytecode artifacts\n"
-    "- Make the logic as clean and readable as possible\n"
-    "- Output only valid Lua 5.1 code\n\n"
-    "Input:\n" + content
-)
-
-payload = {
-    "model": "llama-3.3-70b-versatile",
-    "max_tokens": 8000,
-    "temperature": 0.1,
-    "messages": [{"role": "user", "content": prompt}]
-}
-
-api_key = os.environ.get("GROQ_API_KEY", "")
-if not api_key:
-    print("No GROQ_API_KEY found, skipping AI step")
-    exit(0)
-
-req = urllib.request.Request(
-    "https://api.groq.com/openai/v1/chat/completions",
-    data=json.dumps(payload).encode(),
-    headers={
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {api_key}"
-    }
-)
-
-try:
-    with urllib.request.urlopen(req, timeout=120) as r:
-        data = json.loads(r.read())
-        result = data["choices"][0]["message"]["content"].strip()
-        if result.startswith("```"):
-            lines = result.split("\n")
-            result = "\n".join(lines[1:])
-            if result.endswith("```"):
-                result = result[:-3].strip()
-        with open("result.lua", "w") as f:
-            f.write(result)
-        print(f"AI decompile succeeded, output size: {len(result)} chars")
-except urllib.error.HTTPError as e:
-    print(f"AI HTTP error: {e.code} {e.read().decode()}")
-except Exception as e:
-    print(f"AI decompile failed: {e}")
-PYEOF
           python3 /tmp/ai_decompile.py
           if [ ! -f result.lua ] || [ ! -s result.lua ]; then
             echo "AI failed, using devirt output"
