@@ -25,13 +25,23 @@ jobs:
           java-version: '17'
 
       - name: Install Lua 5.1
-        run: sudo apt-get install -y lua5.1
+        run: sudo apt-get install -y lua5.1 || true
 
-      - name: Install Rust and luadec-rust
+      - name: Cache luadec binary
+        id: cache-luadec
+        uses: actions/cache@v4
+        with:
+          path: /usr/local/bin/luadec
+          key: luadec-binary-v1
+
+      - name: Install Rust and build luadec
+        if: steps.cache-luadec.outputs.cache-hit != 'true'
         run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          source $HOME/.cargo/env
-          cargo install luadec-rust
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y || true
+          source $HOME/.cargo/env || true
+          git clone https://github.com/ItsLucas/luadec.git || true
+          cd luadec && cargo build --release || true
+          cp target/release/luadec /usr/local/bin/luadec || true
 
       - name: Cache build output
         id: cache-build
@@ -52,37 +62,56 @@ jobs:
       - name: Deobfuscate
         shell: bash
         run: |
-          source $HOME/.cargo/env
+          source $HOME/.cargo/env || true
           set +e
+
+          # Step 1 - devirtualize
           dotnet ./out/MoonsecDeobfuscator.dll -dev -i input.lua -o devirt.lua 2>deobf_err.txt
           cat deobf_err.txt || true
           echo "devirt.lua size: $(wc -c < devirt.lua 2>/dev/null || echo 0) bytes"
+
+          # Step 2 - pick best input for decompiler
           if [ -f devirt.lua ] && [ -s devirt.lua ]; then
-            echo "trying luadec-rust..."
-            luadec devirt.lua > result.lua 2>luadec_err.txt
-            LUADEC_EXIT=$?
-            cat luadec_err.txt || true
-            if [ $LUADEC_EXIT -ne 0 ] || [ ! -s result.lua ]; then
-              echo "luadec failed (exit $LUADEC_EXIT), trying unluac..."
-              timeout 120 java -jar unluac.jar devirt.lua > result.lua 2>unluac_err.txt
-              UNLUAC_EXIT=$?
-              cat unluac_err.txt || true
-              if [ $UNLUAC_EXIT -ne 0 ] || [ ! -s result.lua ]; then
-                echo "unluac also failed, using devirt output directly"
-                cp devirt.lua result.lua
-              else
-                echo "unluac succeeded"
-              fi
+            DECOMPILE_INPUT="devirt.lua"
+          else
+            echo "devirt.lua empty or missing, using raw input"
+            DECOMPILE_INPUT="input.lua"
+          fi
+
+          # Step 3 - try luadec
+          echo "trying luadec..."
+          luadec "$DECOMPILE_INPUT" > result.lua 2>luadec_err.txt
+          LUADEC_EXIT=$?
+          cat luadec_err.txt || true
+
+          # Step 4 - try unluac if luadec failed
+          if [ $LUADEC_EXIT -ne 0 ] || [ ! -s result.lua ]; then
+            echo "luadec failed (exit $LUADEC_EXIT), trying unluac..."
+            timeout 120 java -jar unluac.jar "$DECOMPILE_INPUT" > result.lua 2>unluac_err.txt
+            UNLUAC_EXIT=$?
+            cat unluac_err.txt || true
+
+            # Step 5 - fallback to devirt output
+            if [ $UNLUAC_EXIT -ne 0 ] || [ ! -s result.lua ]; then
+              echo "unluac failed, using best available output"
+              cp "$DECOMPILE_INPUT" result.lua
             else
-              echo "luadec succeeded"
+              echo "unluac succeeded"
             fi
           else
-            echo "devirt.lua empty, copying input as result"
+            echo "luadec succeeded"
+          fi
+
+          # Step 6 - absolute last resort
+          if [ ! -f result.lua ] || [ ! -s result.lua ]; then
+            echo "all methods failed, copying original input"
             cp input.lua result.lua
           fi
-          echo "result.lua size: $(wc -c < result.lua 2>/dev/null || echo 0) bytes"
+
+          echo "final result.lua size: $(wc -c < result.lua 2>/dev/null || echo 0) bytes"
 
       - name: Upload result
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: result
