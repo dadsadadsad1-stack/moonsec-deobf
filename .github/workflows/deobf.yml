@@ -1,0 +1,43 @@
+name: Deobf
+
+on:
+  workflow_dispatch:
+    inputs:
+      script_b64:
+        description: 'Base64 encoded script'
+        required: true
+      filename:
+        description: 'Original filename'
+        required: true
+
+jobs:
+  deobf:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Build
+        run: dotnet publish MoonsecDeobfuscator.csproj -c Release -o ./out
+
+      - name: Decode & deobfuscate
+        run: |
+          echo "${{ github.event.inputs.script_b64 }}" | base64 -d > input.lua
+          dotnet ./out/MoonsecDeobfuscator.dll -dev input.lua > devirt.lua
+          java -jar unluac.jar devirt.lua > result.lua || cp devirt.lua result.lua
+
+      - name: Upload result
+        uses: actions/upload-artifact@v4
+        with:
+          name: result
+          path: result.lua
