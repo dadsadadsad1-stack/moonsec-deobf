@@ -38,7 +38,16 @@ jobs:
       - name: Deobfuscate
         run: |
           dotnet ./out/MoonsecDeobfuscator.dll -dev -i input.lua -o devirt.lua
-          java -jar unluac.jar devirt.lua > result.lua || cp devirt.lua result.lua
+          echo "devirt.lua size: $(wc -c < devirt.lua) bytes"
+          timeout 120 java -jar unluac.jar devirt.lua > result.lua 2>unluac_err.txt
+          EXIT=$?
+          if [ $EXIT -ne 0 ]; then
+            echo "unluac failed with code $EXIT"
+            cat unluac_err.txt
+            cp devirt.lua result.lua
+          else
+            echo "unluac succeeded"
+          fi
 
       - name: Upload result
         uses: actions/upload-artifact@v4
