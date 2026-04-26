@@ -27,13 +27,21 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
+      - name: Cache build output
+        id: cache-build
+        uses: actions/cache@v4
+        with:
+          path: ./out
+          key: build-${{ hashFiles('**/*.cs', '**/*.csproj') }}
+
       - name: Build
+        if: steps.cache-build.outputs.cache-hit != 'true'
         run: dotnet publish MoonsecDeobfuscator.csproj -c Release -o ./out
 
       - name: Decode & deobfuscate
         run: |
           echo "${{ github.event.inputs.script_b64 }}" | base64 -d > input.lua
-          dotnet ./out/MoonsecDeobfuscator.dll -dev input.lua > devirt.lua
+          dotnet ./out/MoonsecDeobfuscator.dll -dev -i input.lua -o devirt.lua
           java -jar unluac.jar devirt.lua > result.lua || cp devirt.lua result.lua
 
       - name: Upload result
@@ -41,3 +49,4 @@ jobs:
         with:
           name: result
           path: result.lua
+          retention-days: 1
