@@ -27,22 +27,6 @@ jobs:
       - name: Install Lua 5.1
         run: sudo apt-get install -y lua5.1 || true
 
-      - name: Cache luadec binary
-        id: cache-luadec
-        uses: actions/cache@v4
-        with:
-          path: /usr/local/bin/luadec
-          key: luadec-binary-v1
-
-      - name: Install Rust and build luadec
-        if: steps.cache-luadec.outputs.cache-hit != 'true'
-        run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y || true
-          source $HOME/.cargo/env || true
-          git clone https://github.com/ItsLucas/luadec.git || true
-          cd luadec && cargo build --release || true
-          cp target/release/luadec /usr/local/bin/luadec || true
-
       - name: Cache build output
         id: cache-build
         uses: actions/cache@v4
@@ -62,7 +46,6 @@ jobs:
       - name: Deobfuscate
         shell: bash
         run: |
-          source $HOME/.cargo/env || true
           set +e
 
           # Step 1 - devirtualize
@@ -70,44 +53,114 @@ jobs:
           cat deobf_err.txt || true
           echo "devirt.lua size: $(wc -c < devirt.lua 2>/dev/null || echo 0) bytes"
 
-          # Step 2 - pick best input for decompiler
+          # Step 2 - pick best input
           if [ -f devirt.lua ] && [ -s devirt.lua ]; then
             DECOMPILE_INPUT="devirt.lua"
           else
-            echo "devirt.lua empty or missing, using raw input"
+            echo "devirt.lua empty, using raw input"
             DECOMPILE_INPUT="input.lua"
           fi
 
-          # Step 3 - try luadec
-          echo "trying luadec..."
-          luadec "$DECOMPILE_INPUT" > result.lua 2>luadec_err.txt
-          LUADEC_EXIT=$?
-          cat luadec_err.txt || true
-
-          # Step 4 - try unluac if luadec failed
-          if [ $LUADEC_EXIT -ne 0 ] || [ ! -s result.lua ]; then
-            echo "luadec failed (exit $LUADEC_EXIT), trying unluac..."
-            timeout 120 java -jar unluac.jar "$DECOMPILE_INPUT" > result.lua 2>unluac_err.txt
-            UNLUAC_EXIT=$?
-            cat unluac_err.txt || true
-
-            # Step 5 - fallback to devirt output
-            if [ $UNLUAC_EXIT -ne 0 ] || [ ! -s result.lua ]; then
-              echo "unluac failed, using best available output"
-              cp "$DECOMPILE_INPUT" result.lua
-            else
-              echo "unluac succeeded"
-            fi
+          # Step 3 - try unluac
+          echo "trying unluac..."
+          timeout 120 java -jar unluac.jar "$DECOMPILE_INPUT" > result.lua 2>unluac_err.txt
+          UNLUAC_EXIT=$?
+          cat unluac_err.txt || true
+          if [ $UNLUAC_EXIT -eq 0 ] && [ -s result.lua ]; then
+            echo "unluac succeeded"
           else
-            echo "luadec succeeded"
+            echo "unluac failed, will use AI"
+            cp "$DECOMPILE_INPUT" result.lua
           fi
 
-          # Step 6 - absolute last resort
+      - name: AI Decompile
+        if: always()
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        shell: bash
+        run: |
+          set +e
+          python3 - <<'EOF'
+import urllib.request
+import urllib.error
+import json
+import os
+
+input_file = "result.lua" if os.path.exists("result.lua") and os.path.getsize("result.lua") > 0 else "devirt.lua" if os.path.exists("devirt.lua") and os.path.getsize("devirt.lua") > 0 else "input.lua"
+
+print(f"AI decompiling: {input_file}")
+
+with open(input_file, "r", errors="replace") as f:
+    content = f.read()
+
+MAX_CHARS = 40000
+truncated = False
+if len(content) > MAX_CHARS:
+    content = content[:MAX_CHARS]
+    truncated = True
+    print(f"Warning: truncated to {MAX_CHARS} chars")
+
+prompt = f"""You are a Lua decompiler. I will give you Lua bytecode or devirtualized Lua code. Your job is to produce the cleanest possible readable Lua source code.
+
+Rules:
+- Name all variables as b1, b2, b3, b4... in order of appearance
+- Name all functions as f1, f2, f3... in order of appearance  
+- No comments of any kind
+- No explanations, only output raw Lua code
+- Reconstruct proper if/else, while, for loops from jump instructions
+- Remove all bytecode artifacts
+- Make the logic as clean and readable as possible
+- Output only valid Lua 5.1 code
+
+Input:
+{content}"""
+
+payload = {
+    "model": "llama-3.3-70b-versatile",
+    "max_tokens": 8000,
+    "temperature": 0.1,
+    "messages": [{
+        "role": "user",
+        "content": prompt
+    }]
+}
+
+api_key = os.environ.get("GROQ_API_KEY", "")
+if not api_key:
+    print("No GROQ_API_KEY found, skipping AI step")
+    exit(0)
+
+req = urllib.request.Request(
+    "https://api.groq.com/openai/v1/chat/completions",
+    data=json.dumps(payload).encode(),
+    headers={
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}"
+    }
+)
+
+try:
+    with urllib.request.urlopen(req, timeout=120) as r:
+        data = json.loads(r.read())
+        result = data["choices"][0]["message"]["content"].strip()
+        # Strip markdown code blocks if AI added them
+        if result.startswith("```"):
+            result = result.split("\n", 1)[1] if "\n" in result else result
+            result = result.rsplit("```", 1)[0] if "```" in result else result
+        with open("result.lua", "w") as f:
+            f.write(result)
+        print(f"AI decompile succeeded, output size: {len(result)} chars")
+except urllib.error.HTTPError as e:
+    print(f"AI HTTP error: {e.code} {e.read().decode()}")
+except Exception as e:
+    print(f"AI decompile failed: {e}")
+EOF
+
+          # Final safety net
           if [ ! -f result.lua ] || [ ! -s result.lua ]; then
-            echo "all methods failed, copying original input"
-            cp input.lua result.lua
+            echo "AI failed, using best available output"
+            cp devirt.lua result.lua 2>/dev/null || cp input.lua result.lua
           fi
-
           echo "final result.lua size: $(wc -c < result.lua 2>/dev/null || echo 0) bytes"
 
       - name: Upload result
