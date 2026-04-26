@@ -31,9 +31,11 @@ jobs:
 
       - name: Build luadec
         run: |
-          git clone https://github.com/viruscamp/luadec || true
+          git clone https://github.com/viruscamp/luadec
           cd luadec
-          git clone https://github.com/viruscamp/lua-5.1.5 lua-5.1.5 || true
+          wget -q https://www.lua.org/ftp/lua-5.1.5.tar.gz
+          tar xzf lua-5.1.5.tar.gz
+          mv lua-5.1.5 lua-5.1.5
           cd lua-5.1.5 && make linux && cd ..
           make LUA_VERSION=5.1 || true
           ls -la luadec || true
@@ -101,18 +103,17 @@ jobs:
           LUADEC="./luadec/luadec"
           if [ ! -f "$LUADEC" ]; then
             echo "luadec binary not found, skipping"
-            exit 0
-          fi
-          timeout 120 "$LUADEC" "$DECOMPILE_INPUT" > result.lua 2>luadec_err.txt
-          LUADEC_EXIT=$?
-          cat luadec_err.txt || true
-          if [ $LUADEC_EXIT -eq 0 ] && [ -s result.lua ]; then
-            echo "luadec succeeded"
-            echo "DECOMPILED=true" >> $GITHUB_ENV
           else
-            echo "luadec failed"
-            echo "DECOMPILED=false" >> $GITHUB_ENV
-            rm -f result.lua
+            timeout 120 "$LUADEC" "$DECOMPILE_INPUT" > result.lua 2>luadec_err.txt
+            LUADEC_EXIT=$?
+            cat luadec_err.txt || true
+            if [ $LUADEC_EXIT -eq 0 ] && [ -s result.lua ]; then
+              echo "luadec succeeded"
+              echo "DECOMPILED=true" >> $GITHUB_ENV
+            else
+              echo "luadec failed"
+              rm -f result.lua
+            fi
           fi
 
       - name: Decompile fallback (copy input)
@@ -140,20 +141,20 @@ jobs:
 
           echo "AI decompiling: $INPUT_FILE"
 
-          # Strip null bytes, limit chars to stay under TPM limit
           CONTENT=$(tr -d '\0' < "$INPUT_FILE" | head -c 8000)
 
           PAYLOAD=$(python3 -c "
           import json, sys
           content = sys.stdin.read()
           prompt = (
-              'You are a Lua decompiler. Produce clean readable Lua source code.\n\n'
+              'You are a Lua code cleaner. I will give you deobfuscated Lua code that may have repeated or duplicate logic.\n\n'
               'Rules:\n'
-              '- Name variables as b1, b2, b3... in order\n'
-              '- Name functions as f1, f2, f3... in order\n'
+              '- Use meaningful variable names where possible, otherwise b1, b2, b3...\n'
+              '- Use meaningful function names where possible, otherwise f1, f2, f3...\n'
+              '- Collapse duplicate/repeated code blocks into reusable functions\n'
               '- No comments, no explanations, only raw Lua code\n'
-              '- Reconstruct if/else, while, for loops\n'
-              '- Remove all bytecode artifacts\n'
+              '- Reconstruct proper if/else, while, for loops\n'
+              '- Remove all obfuscation artifacts\n'
               '- Output only valid Lua 5.1 code\n\n'
               'Input:\n' + content
           )
