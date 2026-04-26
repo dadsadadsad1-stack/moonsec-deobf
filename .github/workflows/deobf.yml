@@ -38,22 +38,30 @@ jobs:
         if: steps.cache-build.outputs.cache-hit != 'true'
         run: dotnet publish MoonsecDeobfuscator.csproj -c Release -o ./out
 
+      - name: Download better unluac
+        run: |
+          wget -q https://github.com/Jeong-Min-Cho/unluac/releases/latest/download/unluac.jar -O unluac_new.jar || true
+          if [ -f unluac_new.jar ] && [ -s unluac_new.jar ]; then
+            mv unluac_new.jar unluac.jar
+            echo "using newer unluac"
+          else
+            echo "using bundled unluac"
+          fi
+
       - name: Deobfuscate
         run: |
           dotnet ./out/MoonsecDeobfuscator.dll -dev -i input.lua -o devirt.lua 2>deobf_err.txt || true
           cat deobf_err.txt || true
           echo "devirt.lua size: $(wc -c < devirt.lua 2>/dev/null || echo 0) bytes"
           if [ -f devirt.lua ] && [ -s devirt.lua ]; then
-            luac5.1 -o devirt.luac devirt.lua 2>luac_err.txt || true
-            if [ -f devirt.luac ] && [ -s devirt.luac ]; then
-              echo "luac succeeded, running unluac on bytecode"
-              timeout 120 java -jar unluac.jar devirt.luac > result.lua 2>unluac_err.txt || cp devirt.lua result.lua
+            timeout 120 java -jar unluac.jar devirt.lua > result.lua 2>unluac_err.txt
+            if [ $? -ne 0 ] || [ ! -s result.lua ]; then
+              echo "unluac failed, using devirt output directly"
+              cat unluac_err.txt || true
+              cp devirt.lua result.lua
             else
-              echo "luac failed, trying unluac directly"
-              cat luac_err.txt || true
-              timeout 120 java -jar unluac.jar devirt.lua > result.lua 2>unluac_err.txt || cp devirt.lua result.lua
+              echo "unluac succeeded"
             fi
-            cat unluac_err.txt || true
           else
             echo "devirt.lua empty, copying input as result"
             cp input.lua result.lua
