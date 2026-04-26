@@ -35,7 +35,6 @@ jobs:
           cd luadec
           wget -q https://www.lua.org/ftp/lua-5.1.5.tar.gz
           tar xzf lua-5.1.5.tar.gz
-          mv lua-5.1.5 lua-5.1.5
           cd lua-5.1.5 && make linux && cd ..
           make LUA_VERSION=5.1 || true
           ls -la luadec || true
