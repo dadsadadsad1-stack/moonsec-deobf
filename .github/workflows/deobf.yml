@@ -35,7 +35,8 @@ jobs:
           cd luadec
           wget -q https://www.lua.org/ftp/lua-5.1.5.tar.gz
           tar xzf lua-5.1.5.tar.gz
-          cd lua-5.1.5 && make linux 2>&1 && cd ..
+          cd lua-5.1.5 && make linux 2>&1
+          cd /home/runner/work/moonsec-deobf/moonsec-deobf/luadec
           make LUA_VERSION=5.1 2>&1 || true
           find . -name "luadec" -type f || true
 
