@@ -18,27 +18,6 @@ jobs:
         with:
           dotnet-version: '9.0.x'
 
-      - name: Setup Java
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '17'
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update -q
-          sudo apt-get install -y lua5.1 luarocks build-essential git xxd || true
-
-      - name: Build luadec
-        run: |
-          git clone https://github.com/viruscamp/luadec
-          cd luadec
-          wget -q https://www.lua.org/ftp/lua-5.1.5.tar.gz
-          tar xzf lua-5.1.5.tar.gz
-          cd lua-5.1.5 && make linux && cd ..
-          make LUA_VERSION=5.1 || true
-          ls -la luadec || true
-
       - name: Cache build output
         id: cache-build
         uses: actions/cache@v4
@@ -50,15 +29,9 @@ jobs:
         if: steps.cache-build.outputs.cache-hit != 'true'
         run: dotnet publish MoonsecDeobfuscator.csproj -c Release -o ./out
 
-      - name: Download unluac
-        run: |
-          wget -q "https://sourceforge.net/projects/unluac/files/Unstable/unluac_2025_10_20.jar/download" -O unluac.jar --content-disposition || true
-          echo "unluac.jar size: $(wc -c < unluac.jar 2>/dev/null || echo 0) bytes"
-
       - name: Check input
         run: |
           echo "input.lua size: $(wc -c < input.lua 2>/dev/null || echo 0) bytes"
-          xxd input.lua | head -3 || true
           file input.lua || true
 
       - name: Deobfuscate (MoonsecDeobfuscator)
@@ -69,140 +42,55 @@ jobs:
           cat deobf_err.txt || true
           echo "devirt.lua size: $(wc -c < devirt.lua 2>/dev/null || echo 0) bytes"
           if [ -f devirt.lua ] && [ -s devirt.lua ]; then
-            DECOMPILE_INPUT="devirt.lua"
+            echo "DECOMPILE_INPUT=devirt.lua" >> $GITHUB_ENV
           else
             echo "devirt.lua empty, using raw input"
-            DECOMPILE_INPUT="input.lua"
+            echo "DECOMPILE_INPUT=input.lua" >> $GITHUB_ENV
           fi
-          echo "DECOMPILE_INPUT=$DECOMPILE_INPUT" >> $GITHUB_ENV
 
-      - name: Decompile (unluac)
+      - name: Decompile (Oracle)
         shell: bash
-        run: |
-          set +e
-          echo "trying unluac on $DECOMPILE_INPUT..."
-          timeout 120 java -jar unluac.jar "$DECOMPILE_INPUT" > result.lua 2>unluac_err.txt
-          UNLUAC_EXIT=$?
-          cat unluac_err.txt || true
-          if [ $UNLUAC_EXIT -eq 0 ] && [ -s result.lua ]; then
-            echo "unluac succeeded"
-            echo "DECOMPILED=true" >> $GITHUB_ENV
-          else
-            echo "unluac failed"
-            echo "DECOMPILED=false" >> $GITHUB_ENV
-            rm -f result.lua
-          fi
-
-      - name: Decompile (luadec)
-        if: env.DECOMPILED != 'true'
-        shell: bash
-        run: |
-          set +e
-          echo "trying luadec on $DECOMPILE_INPUT..."
-          LUADEC="./luadec/luadec"
-          if [ ! -f "$LUADEC" ]; then
-            echo "luadec binary not found, skipping"
-          else
-            timeout 120 "$LUADEC" "$DECOMPILE_INPUT" > result.lua 2>luadec_err.txt
-            LUADEC_EXIT=$?
-            cat luadec_err.txt || true
-            if [ $LUADEC_EXIT -eq 0 ] && [ -s result.lua ]; then
-              echo "luadec succeeded"
-              echo "DECOMPILED=true" >> $GITHUB_ENV
-            else
-              echo "luadec failed"
-              rm -f result.lua
-            fi
-          fi
-
-      - name: Decompile fallback (copy input)
-        if: env.DECOMPILED != 'true'
-        shell: bash
-        run: |
-          echo "all decompilers failed, copying best available input for AI"
-          if [ -f devirt.lua ] && [ -s devirt.lua ]; then
-            cp devirt.lua result.lua
-          else
-            cp input.lua result.lua
-          fi
-
-      - name: AI Decompile
-        if: always()
         env:
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-        shell: bash
+          ORACLE_KEY: 019dc9bf-29b1-76ed-ba40-eb51b9aac47d
         run: |
           set +e
-
-          INPUT_FILE="result.lua"
-          if [ ! -s "$INPUT_FILE" ]; then INPUT_FILE="devirt.lua"; fi
-          if [ ! -s "$INPUT_FILE" ]; then INPUT_FILE="input.lua"; fi
-
-          echo "AI decompiling: $INPUT_FILE"
-
-          CONTENT=$(tr -d '\0' < "$INPUT_FILE" | head -c 8000)
-
+          echo "trying Oracle decompiler on $DECOMPILE_INPUT..."
+          ENCODED=$(base64 -w 0 "$DECOMPILE_INPUT")
           PAYLOAD=$(python3 -c "
           import json, sys
-          content = sys.stdin.read()
-          prompt = (
-              'You are a Lua code cleaner. I will give you deobfuscated Lua code that may have repeated or duplicate logic.\n\n'
-              'Rules:\n'
-              '- Use meaningful variable names where possible, otherwise b1, b2, b3...\n'
-              '- Use meaningful function names where possible, otherwise f1, f2, f3...\n'
-              '- Collapse duplicate/repeated code blocks into reusable functions\n'
-              '- No comments, no explanations, only raw Lua code\n'
-              '- Reconstruct proper if/else, while, for loops\n'
-              '- Remove all obfuscation artifacts\n'
-              '- Output only valid Lua 5.1 code\n\n'
-              'Input:\n' + content
-          )
           print(json.dumps({
-              'model': 'llama-3.3-70b-versatile',
-              'max_tokens': 2000,
-              'temperature': 0.1,
-              'messages': [{'role': 'user', 'content': prompt}]
+              'script': '${ENCODED}',
+              'decompilerOptions': {
+                  'renamingType': 'UNIQUE_VALUE_BASED',
+                  'removeDotZero': True,
+                  'sugarGenericFor': True,
+                  'sugarLocalFunctions': True,
+                  'sugarGlobalFunctions': True,
+                  'removeUselessReturnInFunction': True,
+                  'removeUselessNumericForStep': True
+              }
           }))
-          " <<< "$CONTENT")
-
-          RESPONSE=$(curl -s \
+          ")
+          RESPONSE=$(curl -s -w "\n%{http_code}" \
             -H "Content-Type: application/json" \
-            -H "Authorization: Bearer $GROQ_API_KEY" \
-            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+            -H "Authorization: Bearer $ORACLE_KEY" \
             -d "$PAYLOAD" \
-            "https://api.groq.com/openai/v1/chat/completions")
-
-          echo "Groq response preview: ${RESPONSE:0:300}"
-
-          RESULT=$(python3 -c "
-          import json, sys
-          data = json.loads(sys.stdin.read())
-          text = data['choices'][0]['message']['content'].strip()
-          if text.startswith('\`\`\`'):
-              lines = text.split('\n')
-              text = '\n'.join(lines[1:])
-              if text.endswith('\`\`\`'):
-                  text = text[:-3].strip()
-          print(text)
-          " <<< "$RESPONSE" 2>/dev/null)
-
-          if [ -n "$RESULT" ]; then
-            echo "$RESULT" > result.lua
-            echo "AI decompile succeeded, size: $(wc -c < result.lua) bytes"
+            "https://oracle.mshq.dev/decompile")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | head -n -1)
+          echo "Oracle response code: $HTTP_CODE"
+          echo "Oracle response preview: ${BODY:0:200}"
+          if [ "$HTTP_CODE" = "200" ] && [ -n "$BODY" ]; then
+            echo "$BODY" > result.lua
+            echo "Oracle decompile succeeded, size: $(wc -c < result.lua) bytes"
           else
-            echo "AI failed, keeping existing result.lua"
-          fi
-
-          if [ ! -f result.lua ] || [ ! -s result.lua ]; then
+            echo "Oracle failed, falling back to devirt output"
             if [ -f devirt.lua ] && [ -s devirt.lua ]; then
               cp devirt.lua result.lua
-            elif [ -f input.lua ] && [ -s input.lua ]; then
-              cp input.lua result.lua
             else
-              echo "-- deobfuscation failed completely" > result.lua
+              cp input.lua result.lua
             fi
           fi
-
           echo "final result.lua size: $(wc -c < result.lua 2>/dev/null || echo 0) bytes"
 
       - name: Upload result
