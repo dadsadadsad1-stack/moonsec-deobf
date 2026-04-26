@@ -27,7 +27,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y lua5.1 build-essential git xxd || true
+          sudo apt-get install -y lua5.1 build-essential git xxd libreadline-dev || true
 
       - name: Build luadec
         run: |
@@ -35,15 +35,8 @@ jobs:
           cd luadec
           wget -q https://www.lua.org/ftp/lua-5.1.5.tar.gz
           tar xzf lua-5.1.5.tar.gz
-          echo "=== lua dir contents ==="
-          ls -la lua-5.1.5/
           cd lua-5.1.5 && make linux 2>&1 && cd ..
-          echo "=== after lua build ==="
-          ls -la
           make LUA_VERSION=5.1 2>&1 || true
-          echo "=== final luadec dir ==="
-          ls -la
-          echo "=== looking for binary ==="
           find . -name "luadec" -type f || true
 
       - name: Cache build output
@@ -76,12 +69,11 @@ jobs:
           cat deobf_err.txt || true
           echo "devirt.lua size: $(wc -c < devirt.lua 2>/dev/null || echo 0) bytes"
           if [ -f devirt.lua ] && [ -s devirt.lua ]; then
-            DECOMPILE_INPUT="devirt.lua"
+            echo "DECOMPILE_INPUT=devirt.lua" >> $GITHUB_ENV
           else
             echo "devirt.lua empty, using raw input"
-            DECOMPILE_INPUT="input.lua"
+            echo "DECOMPILE_INPUT=input.lua" >> $GITHUB_ENV
           fi
-          echo "DECOMPILE_INPUT=$DECOMPILE_INPUT" >> $GITHUB_ENV
 
       - name: Decompile (unluac)
         shell: bash
