@@ -18,6 +18,34 @@ jobs:
         with:
           dotnet-version: '9.0.x'
 
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y lua5.1 build-essential git xxd || true
+
+      - name: Build luadec
+        run: |
+          git clone https://github.com/viruscamp/luadec
+          cd luadec
+          wget -q https://www.lua.org/ftp/lua-5.1.5.tar.gz
+          tar xzf lua-5.1.5.tar.gz
+          echo "=== lua dir contents ==="
+          ls -la lua-5.1.5/
+          cd lua-5.1.5 && make linux 2>&1 && cd ..
+          echo "=== after lua build ==="
+          ls -la
+          make LUA_VERSION=5.1 2>&1 || true
+          echo "=== final luadec dir ==="
+          ls -la
+          echo "=== looking for binary ==="
+          find . -name "luadec" -type f || true
+
       - name: Cache build output
         id: cache-build
         uses: actions/cache@v4
@@ -29,9 +57,15 @@ jobs:
         if: steps.cache-build.outputs.cache-hit != 'true'
         run: dotnet publish MoonsecDeobfuscator.csproj -c Release -o ./out
 
+      - name: Download unluac
+        run: |
+          wget -q "https://sourceforge.net/projects/unluac/files/Unstable/unluac_2025_10_20.jar/download" -O unluac.jar --content-disposition || true
+          echo "unluac.jar size: $(wc -c < unluac.jar 2>/dev/null || echo 0) bytes"
+
       - name: Check input
         run: |
           echo "input.lua size: $(wc -c < input.lua 2>/dev/null || echo 0) bytes"
+          xxd input.lua | head -3 || true
           file input.lua || true
 
       - name: Deobfuscate (MoonsecDeobfuscator)
@@ -42,56 +76,65 @@ jobs:
           cat deobf_err.txt || true
           echo "devirt.lua size: $(wc -c < devirt.lua 2>/dev/null || echo 0) bytes"
           if [ -f devirt.lua ] && [ -s devirt.lua ]; then
-            echo "DECOMPILE_INPUT=devirt.lua" >> $GITHUB_ENV
+            DECOMPILE_INPUT="devirt.lua"
           else
             echo "devirt.lua empty, using raw input"
-            echo "DECOMPILE_INPUT=input.lua" >> $GITHUB_ENV
+            DECOMPILE_INPUT="input.lua"
           fi
+          echo "DECOMPILE_INPUT=$DECOMPILE_INPUT" >> $GITHUB_ENV
 
-      - name: Decompile (Oracle)
+      - name: Decompile (unluac)
         shell: bash
-        env:
-          ORACLE_KEY: 019dc9bf-29b1-76ed-ba40-eb51b9aac47d
         run: |
           set +e
-          echo "trying Oracle decompiler on $DECOMPILE_INPUT..."
-          ENCODED=$(base64 -w 0 "$DECOMPILE_INPUT")
-          PAYLOAD=$(python3 -c "
-          import json, sys
-          print(json.dumps({
-              'script': '${ENCODED}',
-              'decompilerOptions': {
-                  'renamingType': 'UNIQUE_VALUE_BASED',
-                  'removeDotZero': True,
-                  'sugarGenericFor': True,
-                  'sugarLocalFunctions': True,
-                  'sugarGlobalFunctions': True,
-                  'removeUselessReturnInFunction': True,
-                  'removeUselessNumericForStep': True
-              }
-          }))
-          ")
-          RESPONSE=$(curl -s -w "\n%{http_code}" \
-            -H "Content-Type: application/json" \
-            -H "Authorization: Bearer $ORACLE_KEY" \
-            -d "$PAYLOAD" \
-            "https://oracle.mshq.dev/decompile")
-          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-          BODY=$(echo "$RESPONSE" | head -n -1)
-          echo "Oracle response code: $HTTP_CODE"
-          echo "Oracle response preview: ${BODY:0:200}"
-          if [ "$HTTP_CODE" = "200" ] && [ -n "$BODY" ]; then
-            echo "$BODY" > result.lua
-            echo "Oracle decompile succeeded, size: $(wc -c < result.lua) bytes"
+          echo "trying unluac on $DECOMPILE_INPUT..."
+          timeout 120 java -jar unluac.jar "$DECOMPILE_INPUT" > result.lua 2>unluac_err.txt
+          UNLUAC_EXIT=$?
+          cat unluac_err.txt || true
+          if [ $UNLUAC_EXIT -eq 0 ] && [ -s result.lua ]; then
+            echo "unluac succeeded"
+            echo "DECOMPILED=true" >> $GITHUB_ENV
           else
-            echo "Oracle failed, falling back to devirt output"
-            if [ -f devirt.lua ] && [ -s devirt.lua ]; then
-              cp devirt.lua result.lua
+            echo "unluac failed"
+            echo "DECOMPILED=false" >> $GITHUB_ENV
+            rm -f result.lua
+          fi
+
+      - name: Decompile (luadec)
+        if: env.DECOMPILED != 'true'
+        shell: bash
+        run: |
+          set +e
+          echo "trying luadec on $DECOMPILE_INPUT..."
+          LUADEC=$(find ./luadec -name "luadec" -type f | head -1)
+          if [ -z "$LUADEC" ]; then
+            echo "luadec binary not found, skipping"
+            echo "DECOMPILED=false" >> $GITHUB_ENV
+          else
+            echo "found luadec at: $LUADEC"
+            timeout 120 "$LUADEC" "$DECOMPILE_INPUT" > result.lua 2>luadec_err.txt
+            LUADEC_EXIT=$?
+            cat luadec_err.txt || true
+            if [ $LUADEC_EXIT -eq 0 ] && [ -s result.lua ]; then
+              echo "luadec succeeded"
+              echo "DECOMPILED=true" >> $GITHUB_ENV
             else
-              cp input.lua result.lua
+              echo "luadec failed"
+              echo "DECOMPILED=false" >> $GITHUB_ENV
+              rm -f result.lua
             fi
           fi
-          echo "final result.lua size: $(wc -c < result.lua 2>/dev/null || echo 0) bytes"
+
+      - name: Fallback (copy input)
+        if: env.DECOMPILED != 'true'
+        shell: bash
+        run: |
+          echo "all decompilers failed, copying best available input"
+          if [ -f devirt.lua ] && [ -s devirt.lua ]; then
+            cp devirt.lua result.lua
+          else
+            cp input.lua result.lua
+          fi
 
       - name: Upload result
         if: always()
