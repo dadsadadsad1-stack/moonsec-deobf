@@ -47,21 +47,15 @@ jobs:
         shell: bash
         run: |
           set +e
-
-          # Step 1 - devirtualize
           dotnet ./out/MoonsecDeobfuscator.dll -dev -i input.lua -o devirt.lua 2>deobf_err.txt
           cat deobf_err.txt || true
           echo "devirt.lua size: $(wc -c < devirt.lua 2>/dev/null || echo 0) bytes"
-
-          # Step 2 - pick best input
           if [ -f devirt.lua ] && [ -s devirt.lua ]; then
             DECOMPILE_INPUT="devirt.lua"
           else
             echo "devirt.lua empty, using raw input"
             DECOMPILE_INPUT="input.lua"
           fi
-
-          # Step 3 - try unluac
           echo "trying unluac..."
           timeout 120 java -jar unluac.jar "$DECOMPILE_INPUT" > result.lua 2>unluac_err.txt
           UNLUAC_EXIT=$?
@@ -87,24 +81,21 @@ import json
 import os
 
 input_file = "result.lua" if os.path.exists("result.lua") and os.path.getsize("result.lua") > 0 else "devirt.lua" if os.path.exists("devirt.lua") and os.path.getsize("devirt.lua") > 0 else "input.lua"
-
 print(f"AI decompiling: {input_file}")
 
 with open(input_file, "r", errors="replace") as f:
     content = f.read()
 
 MAX_CHARS = 40000
-truncated = False
 if len(content) > MAX_CHARS:
     content = content[:MAX_CHARS]
-    truncated = True
     print(f"Warning: truncated to {MAX_CHARS} chars")
 
 prompt = f"""You are a Lua decompiler. I will give you Lua bytecode or devirtualized Lua code. Your job is to produce the cleanest possible readable Lua source code.
 
 Rules:
 - Name all variables as b1, b2, b3, b4... in order of appearance
-- Name all functions as f1, f2, f3... in order of appearance  
+- Name all functions as f1, f2, f3... in order of appearance
 - No comments of any kind
 - No explanations, only output raw Lua code
 - Reconstruct proper if/else, while, for loops from jump instructions
@@ -119,10 +110,7 @@ payload = {
     "model": "llama-3.3-70b-versatile",
     "max_tokens": 8000,
     "temperature": 0.1,
-    "messages": [{
-        "role": "user",
-        "content": prompt
-    }]
+    "messages": [{"role": "user", "content": prompt}]
 }
 
 api_key = os.environ.get("GROQ_API_KEY", "")
@@ -143,7 +131,6 @@ try:
     with urllib.request.urlopen(req, timeout=120) as r:
         data = json.loads(r.read())
         result = data["choices"][0]["message"]["content"].strip()
-        # Strip markdown code blocks if AI added them
         if result.startswith("```"):
             result = result.split("\n", 1)[1] if "\n" in result else result
             result = result.rsplit("```", 1)[0] if "```" in result else result
@@ -155,11 +142,15 @@ except urllib.error.HTTPError as e:
 except Exception as e:
     print(f"AI decompile failed: {e}")
 EOF
-
-          # Final safety net
           if [ ! -f result.lua ] || [ ! -s result.lua ]; then
-            echo "AI failed, using best available output"
-            cp devirt.lua result.lua 2>/dev/null || cp input.lua result.lua
+            echo "AI failed, using devirt output"
+            if [ -f devirt.lua ] && [ -s devirt.lua ]; then
+              cp devirt.lua result.lua
+            elif [ -f input.lua ] && [ -s input.lua ]; then
+              cp input.lua result.lua
+            else
+              echo "-- deobfuscation failed completely" > result.lua
+            fi
           fi
           echo "final result.lua size: $(wc -c < result.lua 2>/dev/null || echo 0) bytes"
 
