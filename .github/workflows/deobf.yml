@@ -27,6 +27,12 @@ jobs:
       - name: Install Lua 5.1
         run: sudo apt-get install -y lua5.1
 
+      - name: Install Rust and luadec-rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          source $HOME/.cargo/env
+          cargo install luadec-rust
+
       - name: Cache build output
         id: cache-build
         uses: actions/cache@v4
@@ -46,19 +52,29 @@ jobs:
       - name: Deobfuscate
         shell: bash
         run: |
+          source $HOME/.cargo/env
           set +e
           dotnet ./out/MoonsecDeobfuscator.dll -dev -i input.lua -o devirt.lua 2>deobf_err.txt
           cat deobf_err.txt || true
           echo "devirt.lua size: $(wc -c < devirt.lua 2>/dev/null || echo 0) bytes"
           if [ -f devirt.lua ] && [ -s devirt.lua ]; then
-            timeout 120 java -jar unluac.jar devirt.lua > result.lua 2>unluac_err.txt
-            UNLUAC_EXIT=$?
-            cat unluac_err.txt || true
-            if [ $UNLUAC_EXIT -ne 0 ] || [ ! -s result.lua ]; then
-              echo "unluac failed (exit $UNLUAC_EXIT), using devirt output directly"
-              cp devirt.lua result.lua
+            echo "trying luadec-rust..."
+            luadec devirt.lua > result.lua 2>luadec_err.txt
+            LUADEC_EXIT=$?
+            cat luadec_err.txt || true
+            if [ $LUADEC_EXIT -ne 0 ] || [ ! -s result.lua ]; then
+              echo "luadec failed (exit $LUADEC_EXIT), trying unluac..."
+              timeout 120 java -jar unluac.jar devirt.lua > result.lua 2>unluac_err.txt
+              UNLUAC_EXIT=$?
+              cat unluac_err.txt || true
+              if [ $UNLUAC_EXIT -ne 0 ] || [ ! -s result.lua ]; then
+                echo "unluac also failed, using devirt output directly"
+                cp devirt.lua result.lua
+              else
+                echo "unluac succeeded"
+              fi
             else
-              echo "unluac succeeded"
+              echo "luadec succeeded"
             fi
           else
             echo "devirt.lua empty, copying input as result"
