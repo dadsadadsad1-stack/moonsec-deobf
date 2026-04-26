@@ -38,26 +38,24 @@ jobs:
         if: steps.cache-build.outputs.cache-hit != 'true'
         run: dotnet publish MoonsecDeobfuscator.csproj -c Release -o ./out
 
-      - name: Download better unluac
+      - name: Download unluac
         run: |
-          wget -q https://github.com/Jeong-Min-Cho/unluac/releases/latest/download/unluac.jar -O unluac_new.jar || true
-          if [ -f unluac_new.jar ] && [ -s unluac_new.jar ]; then
-            mv unluac_new.jar unluac.jar
-            echo "using newer unluac"
-          else
-            echo "using bundled unluac"
-          fi
+          wget -q "https://sourceforge.net/projects/unluac/files/Unstable/unluac_2025_10_20.jar/download" -O unluac.jar --content-disposition || true
+          echo "unluac.jar size: $(wc -c < unluac.jar 2>/dev/null || echo 0) bytes"
 
       - name: Deobfuscate
+        shell: bash
         run: |
-          dotnet ./out/MoonsecDeobfuscator.dll -dev -i input.lua -o devirt.lua 2>deobf_err.txt || true
+          set +e
+          dotnet ./out/MoonsecDeobfuscator.dll -dev -i input.lua -o devirt.lua 2>deobf_err.txt
           cat deobf_err.txt || true
           echo "devirt.lua size: $(wc -c < devirt.lua 2>/dev/null || echo 0) bytes"
           if [ -f devirt.lua ] && [ -s devirt.lua ]; then
             timeout 120 java -jar unluac.jar devirt.lua > result.lua 2>unluac_err.txt
-            if [ $? -ne 0 ] || [ ! -s result.lua ]; then
-              echo "unluac failed, using devirt output directly"
-              cat unluac_err.txt || true
+            UNLUAC_EXIT=$?
+            cat unluac_err.txt || true
+            if [ $UNLUAC_EXIT -ne 0 ] || [ ! -s result.lua ]; then
+              echo "unluac failed (exit $UNLUAC_EXIT), using devirt output directly"
               cp devirt.lua result.lua
             else
               echo "unluac succeeded"
@@ -66,7 +64,7 @@ jobs:
             echo "devirt.lua empty, copying input as result"
             cp input.lua result.lua
           fi
-          echo "result.lua size: $(wc -c < result.lua) bytes"
+          echo "result.lua size: $(wc -c < result.lua 2>/dev/null || echo 0) bytes"
 
       - name: Upload result
         uses: actions/upload-artifact@v4
