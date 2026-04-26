@@ -40,20 +40,24 @@ jobs:
 
       - name: Deobfuscate
         run: |
-          dotnet ./out/MoonsecDeobfuscator.dll -dev -i input.lua -o devirt.lua
-          echo "devirt.lua size: $(wc -c < devirt.lua) bytes"
-          luac5.1 -o devirt.luac devirt.lua 2>luac_err.txt
-          if [ $? -ne 0 ]; then
-            echo "luac failed:"
-            cat luac_err.txt
-            echo "trying unluac directly on devirt.lua"
-            timeout 120 java -jar unluac.jar devirt.lua > result.lua 2>unluac_err.txt || cp devirt.lua result.lua
+          dotnet ./out/MoonsecDeobfuscator.dll -dev -i input.lua -o devirt.lua 2>deobf_err.txt || true
+          cat deobf_err.txt || true
+          echo "devirt.lua size: $(wc -c < devirt.lua 2>/dev/null || echo 0) bytes"
+          if [ -f devirt.lua ] && [ -s devirt.lua ]; then
+            luac5.1 -o devirt.luac devirt.lua 2>luac_err.txt || true
+            if [ -f devirt.luac ] && [ -s devirt.luac ]; then
+              echo "luac succeeded, running unluac on bytecode"
+              timeout 120 java -jar unluac.jar devirt.luac > result.lua 2>unluac_err.txt || cp devirt.lua result.lua
+            else
+              echo "luac failed, trying unluac directly"
+              cat luac_err.txt || true
+              timeout 120 java -jar unluac.jar devirt.lua > result.lua 2>unluac_err.txt || cp devirt.lua result.lua
+            fi
+            cat unluac_err.txt || true
           else
-            echo "luac succeeded, running unluac on bytecode"
-            timeout 120 java -jar unluac.jar devirt.luac > result.lua 2>unluac_err.txt || cp devirt.lua result.lua
+            echo "devirt.lua empty, copying input as result"
+            cp input.lua result.lua
           fi
-          echo "unluac output:"
-          cat unluac_err.txt || true
           echo "result.lua size: $(wc -c < result.lua) bytes"
 
       - name: Upload result
